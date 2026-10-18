@@ -65,6 +65,8 @@ function Inner() {
   useEffect(() => { localStorage.setItem(KEY + '-cloud', JSON.stringify(cloud)) }, [cloud])
   useEffect(() => { api.me().then((r) => setUser(r.user?.email ?? null)).catch(() => {}) }, [])
   useEffect(() => {
+    const t = /^#\/t\/([a-z]+)$/.exec(location.hash)
+    if (t && TEMPLATES[t[1]]) { setBoard(stack(TEMPLATES[t[1]]())); setCloud(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 80); return }
     const m = /^#\/s\/([A-Za-z0-9]+)$/.exec(location.hash)
     if (!m) return
     api.shared(m[1]).then((r) => { setBoard(validate(r.board)); setRo(true); setCloud(null); setTimeout(() => rf.fitView({ padding: 0.15 }), 80) }).catch((e) => flash((e as Error).message))
