@@ -6,7 +6,7 @@ Templates: Council stage map, CargoIQ case map, Flavourly journey, RevenueDesk l
 
 Limits: the map is a view and a set of notes. It reads and writes no product records, and moving a card never counts as an approval. Boards are saved in the browser on the device. Use Save JSON to move a board.
 
-Built on React Flow (MIT). Owned by NahaLabs (Pty) Ltd. No third-party product code or assets are used.
+Owned by NahaLabs (Pty) Ltd. Open-source component licences are listed in package-lock.json.
 
     npm install
     npm run dev
