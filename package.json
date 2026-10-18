@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:orgs": "node test/orgs.test.mjs",
     "lint": "oxlint",
     "preview": "vite preview"
   },

@@ -8,7 +8,7 @@ import '@xyflow/react/dist/style.css'
 import { toPng } from 'html-to-image'
 import { EVIDENCE, EVIDENCE_HELP, type Board, type CardData, type Evidence } from './types'
 import { TEMPLATES, TEMPLATE_NAMES } from './templates'
-import { api, ApiError, type BoardRow } from './api'
+import { api, ApiError, type BoardRow, type Org, type Member } from './api'
 import { download, fromMermaid, toBrief, toMermaid, validate } from './io'
 
 const MOBILE = typeof window !== 'undefined' && window.innerWidth <= 760
@@ -51,7 +51,11 @@ function Inner() {
   const [msg, setMsg] = useState('')
   const [text, setText] = useState('')
   const [user, setUser] = useState<string | null>(null)
-  const [dlg, setDlg] = useState<null | 'auth' | 'boards'>(null)
+  const [dlg, setDlg] = useState<null | 'auth' | 'boards' | 'members'>(null)
+  const [orgs, setOrgs] = useState<Org[]>([])
+  const [orgId, setOrgId] = useState<string | null>(() => localStorage.getItem(KEY + '-org'))
+  const [joinTok, setJoinTok] = useState<string | null>(null)
+  const [joinInfo, setJoinInfo] = useState<{ org: string; role: string } | null>(null)
   const [cloud, setCloud] = useState<{ id: string; rev: number } | null>(() => { try { return JSON.parse(localStorage.getItem(KEY + '-cloud') || 'null') } catch { return null } })
   const [sync, setSync] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [ro, setRo] = useState(false)
@@ -63,7 +67,23 @@ function Inner() {
 
   useEffect(() => { if (!ro) localStorage.setItem(KEY, JSON.stringify(board)) }, [board, ro])
   useEffect(() => { localStorage.setItem(KEY + '-cloud', JSON.stringify(cloud)) }, [cloud])
-  useEffect(() => { api.me().then((r) => setUser(r.user?.email ?? null)).catch(() => {}) }, [])
+  const applyOrgs = (list: Org[], prefer?: string) => {
+    setOrgs(list)
+    const keep = prefer && list.find((o) => o.id === prefer) ? prefer : list.find((o) => o.id === orgId) ? orgId : list[0]?.id ?? null
+    setOrgId(keep); if (keep) localStorage.setItem(KEY + '-org', keep)
+  }
+  const activeOrg = orgs.find((o) => o.id === orgId) ?? null
+  useEffect(() => { api.me().then((r) => { setUser(r.user?.email ?? null); applyOrgs(r.orgs || []) }).catch(() => {}) }, []) // eslint-disable-line
+  useEffect(() => {
+    const m = /^#\/join\/([A-Za-z0-9]+)$/.exec(location.hash)
+    if (m) { setJoinTok(m[1]); api.joinPreview(m[1]).then(setJoinInfo).catch((e) => flash((e as Error).message)) }
+  }, []) // eslint-disable-line
+  const doJoin = async (authed = !!user) => {
+    if (!joinTok) return
+    if (!authed) { setDlg('auth'); return }
+    try { const r = await api.join(joinTok); applyOrgs(r.orgs, r.joined); setJoinTok(null); setJoinInfo(null); history.replaceState(null, '', location.pathname); setDlg('boards'); flash('You joined the organisation.') }
+    catch (e) { flash((e as Error).message) }
+  }
   useEffect(() => {
     const t = /^#\/t\/([a-z]+)$/.exec(location.hash)
     if (t && TEMPLATES[t[1]]) { setBoard(stack(TEMPLATES[t[1]]())); setCloud(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 80); return }
@@ -130,14 +150,15 @@ function Inner() {
 
   const saveToAccount = async () => {
     if (!user) { setDlg('auth'); return }
-    try { const r = await api.create(board); lastSaved.current = board.revision; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); flash('Saved to your account.') }
+    if (!activeOrg || activeOrg.role === 'viewer') { flash('You have view-only access in this organisation. Pick another one or make your own.'); return }
+    try { const r = await api.create(board, activeOrg.id); lastSaved.current = board.revision; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); flash('Saved to your account.') }
     catch (e) { flash((e as Error).message) }
   }
   const openCloud = async (id: string) => {
-    try { const r = await api.get(id); const b = validate(r.board); past.current = []; setBoard(b); lastSaved.current = b.revision; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); setDlg(null); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 80) }
+    try { const r = await api.get(id); const b = validate(r.board); past.current = []; setRo(r.role === 'viewer'); if (r.org) { setOrgId(r.org); localStorage.setItem(KEY + '-org', r.org) } setBoard(b); lastSaved.current = b.revision; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); setDlg(null); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 80) }
     catch (e) { flash((e as Error).message) }
   }
-  const copyShared = () => { setRo(false); history.replaceState(null, '', location.pathname); setBoard((b) => ({ ...b, id: 'copy' + Date.now() })); flash('This is now your own editable copy on this device.') }
+  const copyShared = () => { setRo(false); setCloud(null); setSync('idle'); history.replaceState(null, '', location.pathname); setBoard((b) => ({ ...b, id: 'copy' + Date.now() })); flash('This is now your own editable copy on this device.') }
   const counts = EVIDENCE.map((e) => [e, board.nodes.filter((n) => n.data.evidence === e).length] as const)
   const noOwner = board.nodes.filter((n) => !n.data.owner.trim()).length
 
@@ -214,6 +235,7 @@ function Inner() {
         </details>
       </section>
 
+      {joinTok && joinInfo && <div className="joinbar" role="status"><span>You were invited to <b>{joinInfo.org}</b> as {joinInfo.role}.</span><button className="primary" onClick={() => doJoin()}>{user ? 'Join organisation' : 'Sign up or log in to join'}</button></div>}
       <nav className="tabs" role="tablist">
         {(['map', 'list', 'text'] as const).map((v) => <button key={v} role="tab" aria-selected={view === v} className={view === v ? 'on' : ''} onClick={() => setView(v)}>{v === 'map' ? 'Map' : v === 'list' ? 'List view' : 'Text'}</button>)}
       </nav>
@@ -276,10 +298,11 @@ function Inner() {
           ) : <p className="hint">Select a card to edit its owner, evidence and next action. Drag from one card's right dot to another's left dot to link them.</p>}
         </fieldset></aside>
       </main>
-      {dlg === 'auth' && <AuthDialog onClose={() => setDlg(null)} onDone={(e) => { setUser(e); setDlg(null); flash('Signed in. Use My boards, or save this board to your account.') }} />}
-      {dlg === 'boards' && user && <BoardsDialog email={user} current={cloud?.id ?? null} onClose={() => setDlg(null)} onOpen={openCloud}
-        onSaveNew={saveToAccount} onLogout={async () => { await api.logout().catch(() => {}); setUser(null); setCloud(null); setSync('idle'); setDlg(null) }}
+      {dlg === 'auth' && <AuthDialog onClose={() => setDlg(null)} onDone={(e) => { setUser(e); api.me().then((r) => applyOrgs(r.orgs || [])); if (joinTok) { setDlg(null); setTimeout(() => doJoin(true), 200) } else { setDlg(null); flash('Signed in. Use My boards, or save this board to your account.') } }} />}
+      {dlg === 'boards' && user && activeOrg && <BoardsDialog email={user} orgs={orgs} org={activeOrg} onOrg={(id) => { setOrgId(id); localStorage.setItem(KEY + '-org', id) }} onOrgs={applyOrgs} onMembers={() => setDlg('members')} current={cloud?.id ?? null} onClose={() => setDlg(null)} onOpen={openCloud}
+        onSaveNew={saveToAccount} onLogout={async () => { await api.logout().catch(() => {}); setUser(null); setOrgs([]); setCloud(null); setSync('idle'); setDlg(null) }}
         onDeleted={(id) => { if (cloud?.id === id) setCloud(null) }} shareTok={shareTok} setShareTok={setShareTok} flash={flash} />}
+      {dlg === 'members' && activeOrg && <MembersDialog org={activeOrg} onClose={() => setDlg('boards')} flash={flash} onOrgs={applyOrgs} />}
       <div className="toast" role="status" aria-live="polite">{msg}</div>
     </div>
   )
@@ -292,10 +315,10 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 function AuthDialog({ onClose, onDone }: { onClose: () => void; onDone: (email: string) => void }) {
   const [mode, setMode] = useState<'signup' | 'login'>('signup')
-  const [email, setEmail] = useState(''); const [pw, setPw] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
+  const [email, setEmail] = useState(''); const [pw, setPw] = useState(''); const [wn, setWn] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setBusy(true); setErr('')
-    try { const r = await (mode === 'signup' ? api.signup : api.login)(email, pw); onDone(r.user.email) }
+    try { const r = mode === 'signup' ? await api.signup(email, pw, wn.trim() || undefined) : await api.login(email, pw); onDone(r.user.email) }
     catch (x) { setErr(x instanceof ApiError ? x.message : 'Something went wrong.') } finally { setBusy(false) }
   }
   return <Modal title={mode === 'signup' ? 'Create your free account' : 'Log in'} onClose={onClose}>
@@ -303,6 +326,7 @@ function AuthDialog({ onClose, onDone }: { onClose: () => void; onDone: (email: 
     <form onSubmit={submit} className="form">
       <label>Email<input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></label>
       <label>Password<input type="password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} required minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} /></label>
+      {mode === 'signup' && <label>Organisation or workspace name (optional)<input autoComplete="organization" maxLength={80} value={wn} onChange={(e) => setWn(e.target.value)} placeholder="Your company or team" /></label>}
       {mode === 'signup' && <small>At least 8 characters. There is no password reset yet, so keep it somewhere safe.</small>}
       {err && <div className="err" role="alert">{err}</div>}
       <button className="primary" disabled={busy}>{busy ? 'Please wait…' : mode === 'signup' ? 'Create account' : 'Log in'}</button>
@@ -310,26 +334,58 @@ function AuthDialog({ onClose, onDone }: { onClose: () => void; onDone: (email: 
     <button className="link" onClick={() => { setMode(mode === 'signup' ? 'login' : 'signup'); setErr('') }}>{mode === 'signup' ? 'I already have an account' : 'Create a free account'}</button>
   </Modal>
 }
-function BoardsDialog(p: { email: string; current: string | null; onClose: () => void; onOpen: (id: string) => void; onSaveNew: () => void; onLogout: () => void; onDeleted: (id: string) => void; shareTok: string | null; setShareTok: (t: string | null) => void; flash: (m: string) => void }) {
+function BoardsDialog(p: { email: string; orgs: Org[]; org: Org; onOrg: (id: string) => void; onOrgs: (l: Org[], prefer?: string) => void; onMembers: () => void; current: string | null; onClose: () => void; onOpen: (id: string) => void; onSaveNew: () => void; onLogout: () => void; onDeleted: (id: string) => void; shareTok: string | null; setShareTok: (t: string | null) => void; flash: (m: string) => void }) {
   const [rows, setRows] = useState<BoardRow[] | null>(null)
-  const load = () => api.list().then((r) => setRows(r.boards)).catch((e) => p.flash((e as Error).message))
-  useEffect(() => { load() }, []) // eslint-disable-line
+  const load = () => api.list(p.org.id).then((r) => setRows(r.boards)).catch((e) => p.flash((e as Error).message))
+  useEffect(() => { setRows(null); load() }, [p.org.id]) // eslint-disable-line
+  const canWrite = p.org.role !== 'viewer'
+  const newOrg = async () => { const n = prompt('Name for the new organisation'); if (!n) return; try { const r = await api.createOrg(n); p.onOrgs(r.orgs, r.id) } catch (e) { p.flash((e as Error).message) } }
   const link = (t: string) => `${location.origin}${location.pathname}#/s/${t}`
   const share = async (r: BoardRow) => { try { const x = await api.share(r.id); await navigator.clipboard?.writeText(link(x.token)).catch(() => {}); p.flash('View-only link copied.'); load() } catch (e) { p.flash((e as Error).message) } }
   const unshare = async (r: BoardRow) => { await api.unshare(r.id).catch(() => {}); p.flash('Link switched off.'); load() }
   const del = async (r: BoardRow) => { if (!confirm(`Delete "${r.title}"? This cannot be undone.`)) return; await api.remove(r.id).catch(() => {}); p.onDeleted(r.id); load() }
   return <Modal title="My boards" onClose={p.onClose}>
     <p className="hint">Signed in as <b>{p.email}</b>.</p>
-    <div className="row"><button className="primary" onClick={() => { p.onSaveNew(); setTimeout(load, 700) }}>Save current board to my account</button><button onClick={p.onLogout}>Log out</button></div>
+    <div className="row">
+      <select aria-label="Organisation" value={p.org.id} onChange={(e) => p.onOrg(e.target.value)}>{p.orgs.map((o) => <option key={o.id} value={o.id}>{o.name} ({o.role})</option>)}</select>
+      <button onClick={p.onMembers}>People</button><button onClick={newOrg}>New organisation</button>
+    </div>
+    <div className="row">{canWrite ? <button className="primary" onClick={() => { p.onSaveNew(); setTimeout(load, 700) }}>Save current board to {p.org.name}</button> : <span className="hint">You have view-only access in this organisation.</span>}<button onClick={p.onLogout}>Log out</button></div>
     <div className="blist">
       {rows === null ? <p className="hint">Loading…</p> : rows.length === 0 ? <p className="hint">No saved boards yet. Save the current one to start.</p> :
         rows.map((r) => <div key={r.id} className={`brow ${r.id === p.current ? 'on' : ''}`}>
           <div className="bt"><b>{r.title}</b><small>{new Date(r.updated).toLocaleString()}{r.id === p.current ? ' · open now' : ''}</small></div>
           <div className="row"><button onClick={() => p.onOpen(r.id)}>Open</button>
-            {r.share ? <><button onClick={() => navigator.clipboard?.writeText(link(r.share!)).then(() => p.flash('Link copied.'))}>Copy link</button><button onClick={() => unshare(r)}>Stop sharing</button></> : <button onClick={() => share(r)}>Share</button>}
-            <button className="danger" onClick={() => del(r)}>Delete</button></div>
+            {!canWrite ? null : r.share ? <><button onClick={() => navigator.clipboard?.writeText(link(r.share!)).then(() => p.flash('Link copied.'))}>Copy link</button><button onClick={() => unshare(r)}>Stop sharing</button></> : <button onClick={() => share(r)}>Share</button>}
+            {canWrite && <button className="danger" onClick={() => del(r)}>Delete</button>}</div>
         </div>)}
     </div>
+  </Modal>
+}
+function MembersDialog({ org, onClose, flash, onOrgs }: { org: Org; onClose: () => void; flash: (m: string) => void; onOrgs: (l: Org[], prefer?: string) => void }) {
+  const [data, setData] = useState<{ members: Member[]; you: string; links: { token: string; role: string }[] } | null>(null)
+  const [role, setRole] = useState<'editor' | 'viewer'>('editor')
+  const owner = org.role === 'owner'
+  const load = () => api.members(org.id).then(setData).catch((e) => flash((e as Error).message))
+  useEffect(() => { load() }, [org.id]) // eslint-disable-line
+  const link = (t: string) => `${location.origin}${location.pathname}#/join/${t}`
+  const act = async (f: () => Promise<unknown>, m?: string) => { try { await f(); if (m) flash(m); load() } catch (e) { flash((e as Error).message) } }
+  const rename = () => { const n = prompt('Organisation name', org.name); if (n) act(async () => onOrgs((await api.renameOrg(org.id, n)).orgs, org.id), 'Renamed.') }
+  return <Modal title={org.name} onClose={onClose}>
+    <p className="hint">You are {org.role === 'owner' ? 'an owner' : 'an ' + org.role}. {owner ? 'Owners manage people. Editors change boards. Viewers can only read.' : 'Only owners can change people.'}</p>
+    {owner && <div className="row"><button onClick={rename}>Rename</button></div>}
+    <div className="blist">{!data ? <p className="hint">Loading…</p> : data.members.map((m) => <div key={m.id} className="brow">
+      <div className="bt"><b>{m.email}{m.id === data.you ? ' (you)' : ''}</b><small>{m.role}</small></div>
+      <div className="row">
+        {owner && <select aria-label={'Role for ' + m.email} value={m.role} onChange={(e) => act(() => api.setRole(org.id, m.id, e.target.value), 'Role changed.')}><option>owner</option><option>editor</option><option>viewer</option></select>}
+        {(owner || m.id === data.you) && <button className="danger" onClick={() => confirm(m.id === data.you ? 'Leave this organisation?' : 'Remove this person?') && act(async () => { await api.removeMember(org.id, m.id); if (m.id === data.you) { onOrgs((await api.me()).orgs); onClose() } }, m.id === data.you ? 'You left.' : 'Removed.')}>{m.id === data.you ? 'Leave' : 'Remove'}</button>}
+      </div></div>)}</div>
+    {owner && data && <div className="blist"><b>Join link</b>
+      <p className="hint">Anyone with the link can sign up and join with the role you pick. It expires in 14 days and you can switch it off.</p>
+      <div className="row"><select aria-label="Role for joiners" value={role} onChange={(e) => setRole(e.target.value as 'editor' | 'viewer')}><option value="editor">Editor</option><option value="viewer">Viewer</option></select>
+        <button onClick={() => act(async () => { const r = await api.joinLink(org.id, role); await navigator.clipboard?.writeText(link(r.token)).catch(() => {}) }, 'New link copied.')}>{data.links.length ? 'Replace and copy link' : 'Create and copy link'}</button>
+        {data.links.length > 0 && <><button onClick={() => navigator.clipboard?.writeText(link(data.links[0].token)).then(() => flash('Link copied.'))}>Copy link</button><button onClick={() => act(() => api.joinLinkOff(org.id), 'Link switched off.')}>Switch off</button></>}</div>
+      {data.links.length > 0 && <small>Active link gives {data.links[0].role} access.</small>}</div>}
   </Modal>
 }
 export default function App() { return <ReactFlowProvider><Inner /></ReactFlowProvider> }
