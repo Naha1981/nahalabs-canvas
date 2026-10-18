@@ -26,7 +26,7 @@ jobs:
         with:
           path: dist
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: false
     needs: build
     runs-on: ubuntu-latest
     environment:

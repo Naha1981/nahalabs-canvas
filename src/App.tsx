@@ -8,13 +8,15 @@ import '@xyflow/react/dist/style.css'
 import { toPng } from 'html-to-image'
 import { EVIDENCE, EVIDENCE_HELP, type Board, type CardData, type Evidence } from './types'
 import { TEMPLATES, TEMPLATE_NAMES } from './templates'
+import { api, ApiError, type BoardRow } from './api'
 import { download, fromMermaid, toBrief, toMermaid, validate } from './io'
 
 const MOBILE = typeof window !== 'undefined' && window.innerWidth <= 760
 const KEY = 'nahalabs-canvas-v1'
+const stack = (b: Board): Board => MOBILE ? { ...b, nodes: b.nodes.map((n, i) => ({ ...n, position: { x: 0, y: i * 200 } })) } : b
 const load = (): Board => {
   try { const s = localStorage.getItem(KEY); if (s) return validate(JSON.parse(s)) } catch { /* fall through */ }
-  return TEMPLATES.council()
+  return stack(TEMPLATES.council())
 }
 
 function Rich({ text }: { text: string }) {
@@ -48,12 +50,40 @@ function Inner() {
   const [view, setView] = useState<'map' | 'list' | 'text'>('map')
   const [msg, setMsg] = useState('')
   const [text, setText] = useState('')
+  const [user, setUser] = useState<string | null>(null)
+  const [dlg, setDlg] = useState<null | 'auth' | 'boards'>(null)
+  const [cloud, setCloud] = useState<{ id: string; rev: number } | null>(() => { try { return JSON.parse(localStorage.getItem(KEY + '-cloud') || 'null') } catch { return null } })
+  const [sync, setSync] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [ro, setRo] = useState(false)
+  const [shareTok, setShareTok] = useState<string | null>(null)
   const past = useRef<Board[]>([])
   const future = useRef<Board[]>([])
   const wrap = useRef<HTMLDivElement>(null)
   const rf = useReactFlow()
 
-  useEffect(() => { localStorage.setItem(KEY, JSON.stringify(board)) }, [board])
+  useEffect(() => { if (!ro) localStorage.setItem(KEY, JSON.stringify(board)) }, [board, ro])
+  useEffect(() => { localStorage.setItem(KEY + '-cloud', JSON.stringify(cloud)) }, [cloud])
+  useEffect(() => { api.me().then((r) => setUser(r.user?.email ?? null)).catch(() => {}) }, [])
+  useEffect(() => {
+    const m = /^#\/s\/([A-Za-z0-9]+)$/.exec(location.hash)
+    if (!m) return
+    api.shared(m[1]).then((r) => { setBoard(validate(r.board)); setRo(true); setCloud(null); setTimeout(() => rf.fitView({ padding: 0.15 }), 80) }).catch((e) => flash((e as Error).message))
+  }, []) // eslint-disable-line
+  // autosave to account
+  const lastSaved = useRef(0)
+  useEffect(() => {
+    if (!cloud || !user || ro) return
+    if (lastSaved.current === board.revision) return
+    setSync('saving')
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.save(cloud.id, board, cloud.rev)
+        lastSaved.current = board.revision
+        setCloud({ id: cloud.id, rev: r.rev }); setSync('saved')
+      } catch (e) { setSync('error'); flash((e as Error).message) }
+    }, 1200)
+    return () => clearTimeout(t)
+  }, [board, cloud, user, ro])
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 3500) }
 
   const commit = useCallback((fn: (b: Board) => Board, record = true) => {
@@ -94,8 +124,18 @@ function Inner() {
     setSel(id)
   }
   const del = () => { if (sel) { commit((b) => ({ ...b, nodes: b.nodes.filter((n) => n.id !== sel), edges: b.edges.filter((e) => e.source !== sel && e.target !== sel) })); setSel(null) } }
-  const useTemplate = (k: string) => { if (!k) return; past.current.push(board); future.current = []; setBoard(TEMPLATES[k]()); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 50) }
+  const useTemplate = (k: string) => { if (!k || ro) return; setCloud(null); setSync('idle'); past.current.push(board); future.current = []; setBoard(stack(TEMPLATES[k]())); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 50) }
 
+  const saveToAccount = async () => {
+    if (!user) { setDlg('auth'); return }
+    try { const r = await api.create(board); lastSaved.current = board.revision; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); flash('Saved to your account.') }
+    catch (e) { flash((e as Error).message) }
+  }
+  const openCloud = async (id: string) => {
+    try { const r = await api.get(id); const b = validate(r.board); past.current = []; setBoard(b); lastSaved.current = b.revision; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); setDlg(null); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 80) }
+    catch (e) { flash((e as Error).message) }
+  }
+  const copyShared = () => { setRo(false); history.replaceState(null, '', location.pathname); setBoard((b) => ({ ...b, id: 'copy' + Date.now() })); flash('This is now your own editable copy on this device.') }
   const counts = EVIDENCE.map((e) => [e, board.nodes.filter((n) => n.data.evidence === e).length] as const)
   const noOwner = board.nodes.filter((n) => !n.data.owner.trim()).length
 
@@ -138,17 +178,23 @@ function Inner() {
       <header className="top">
         <div className="brand"><span className="logo" aria-hidden>N</span><div><div className="bname">NahaLabs Canvas</div><div className="bsub">Visual systems maps with evidence labels</div></div></div>
         <div className="tools" role="toolbar" aria-label="Board actions">
-          <select aria-label="Start from a template" value="" onChange={(e) => useTemplate(e.target.value)}>
-            <option value="">Templates</option>
-            {Object.entries(TEMPLATE_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-          </select>
-          <button onClick={addCard}>Add card</button>
-          <button onClick={undo} aria-label="Undo">Undo</button>
-          <button onClick={redo} aria-label="Redo">Redo</button>
+          {!ro && (user
+            ? <button onClick={() => setDlg('boards')}>My boards</button>
+            : <button className="gold" onClick={() => setDlg('auth')}>Sign up free</button>)}
+          {!ro && <>
+            <select aria-label="Start from a template" value="" onChange={(e) => useTemplate(e.target.value)}>
+              <option value="">Templates</option>
+              {Object.entries(TEMPLATE_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+            <button onClick={addCard}>Add card</button>
+            <button onClick={undo} aria-label="Undo">Undo</button>
+            <button onClick={redo} aria-label="Redo">Redo</button>
+          </>}
+          {ro && <button className="primary" onClick={copyShared}>Make my own copy</button>}
           <button onClick={() => download(`${board.id}.json`, 'application/json', JSON.stringify(board, null, 2))}>Save JSON</button>
-          <label className="btn">Open JSON<input type="file" accept="application/json,.json" hidden onChange={(e) => { importFile(e.target.files?.[0]); e.target.value = '' }} /></label>
+          {!ro && <label className="btn">Open JSON<input type="file" accept="application/json,.json" hidden onChange={(e) => { importFile(e.target.files?.[0]); e.target.value = '' }} /></label>}
           <button onClick={exportPng}>PNG</button>
-          <button className="primary" onClick={() => download(`${board.id}-brief.md`, 'text/markdown', toBrief(board))}>Export brief</button>
+          <button className={ro ? '' : 'primary'} onClick={() => download(`${board.id}-brief.md`, 'text/markdown', toBrief(board))}>Export brief</button>
         </div>
       </header>
 
@@ -158,7 +204,7 @@ function Inner() {
         <div className="chips" aria-label="Evidence summary">
           {counts.map(([e, n]) => <span key={e} className={`chip chip-${e.toLowerCase()}`} title={EVIDENCE_HELP[e]}>{e} {n}</span>)}
           <span className="chip chip-owner">{noOwner} without owner</span>
-          <span className="rev">Revision {board.revision} · saved on this device</span>
+          <span className="rev">Revision {board.revision} · {ro ? "shared, view only" : cloud && user ? (sync === "saving" ? "saving to your account…" : sync === "error" ? "not saved to your account, retrying on next change" : "saved to your account") : "saved on this device"}</span>
         </div>
         <details className="limits" open={typeof window === 'undefined' || window.innerWidth > 760}>
           <summary><b>Limits</b> - what this map is not</summary>
@@ -173,8 +219,8 @@ function Inner() {
       <main className="work">
         <div className="stage" ref={wrap} hidden={view !== 'map'}>
           <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodes} onEdgesChange={onEdges} onConnect={onConnect} connectionMode={ConnectionMode.Loose}
-            onNodeClick={(_, n) => setSel(n.id)} onPaneClick={() => setSel(null)} {...(MOBILE ? { defaultViewport: { x: 16, y: 16, zoom: 0.8 } } : { fitView: true, fitViewOptions: { padding: 0.15 } })} minZoom={0.2} maxZoom={1.8}
-            deleteKeyCode={['Backspace', 'Delete']} proOptions={{ hideAttribution: true }}>
+            onNodeClick={(_, n) => setSel(n.id)} onPaneClick={() => setSel(null)} nodesDraggable={!ro} nodesConnectable={!ro} {...(MOBILE ? { defaultViewport: { x: 16, y: 16, zoom: 0.8 } } : { fitView: true, fitViewOptions: { padding: 0.15 } })} minZoom={0.2} maxZoom={1.8}
+            deleteKeyCode={ro ? null : ['Backspace', 'Delete']} proOptions={{ hideAttribution: true }}>
             <Background color="#e5dcc6" gap={22} />
             <Controls showInteractive={false} />
             <MiniMap pannable zoomable className="mm" />
@@ -209,7 +255,7 @@ function Inner() {
           </div>
         )}
 
-        <aside className={`inspector ${selected ? 'open' : ''}`} aria-label="Card details">
+        <aside className={`inspector ${selected ? 'open' : ''}`} aria-label="Card details"><fieldset disabled={ro} className="fs">
           {selected ? (
             <>
               <div className="ins-head"><b>Card details</b><button onClick={() => setSel(null)} aria-label="Close details">Close</button></div>
@@ -226,10 +272,62 @@ function Inner() {
               <button className="danger" onClick={del}>Delete card</button>
             </>
           ) : <p className="hint">Select a card to edit its owner, evidence and next action. Drag from one card's right dot to another's left dot to link them.</p>}
-        </aside>
+        </fieldset></aside>
       </main>
+      {dlg === 'auth' && <AuthDialog onClose={() => setDlg(null)} onDone={(e) => { setUser(e); setDlg(null); flash('Signed in. Use My boards, or save this board to your account.') }} />}
+      {dlg === 'boards' && user && <BoardsDialog email={user} current={cloud?.id ?? null} onClose={() => setDlg(null)} onOpen={openCloud}
+        onSaveNew={saveToAccount} onLogout={async () => { await api.logout().catch(() => {}); setUser(null); setCloud(null); setSync('idle'); setDlg(null) }}
+        onDeleted={(id) => { if (cloud?.id === id) setCloud(null) }} shareTok={shareTok} setShareTok={setShareTok} flash={flash} />}
       <div className="toast" role="status" aria-live="polite">{msg}</div>
     </div>
   )
+}
+
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => { const h = (e: KeyboardEvent) => e.key === 'Escape' && onClose(); window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
+  return <div className="modal-bg" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}>
+    <div className="ins-head"><b>{title}</b><button onClick={onClose}>Close</button></div>{children}</div></div>
+}
+function AuthDialog({ onClose, onDone }: { onClose: () => void; onDone: (email: string) => void }) {
+  const [mode, setMode] = useState<'signup' | 'login'>('signup')
+  const [email, setEmail] = useState(''); const [pw, setPw] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr('')
+    try { const r = await (mode === 'signup' ? api.signup : api.login)(email, pw); onDone(r.user.email) }
+    catch (x) { setErr(x instanceof ApiError ? x.message : 'Something went wrong.') } finally { setBusy(false) }
+  }
+  return <Modal title={mode === 'signup' ? 'Create your free account' : 'Log in'} onClose={onClose}>
+    <p className="hint">{mode === 'signup' ? 'Anyone can sign up. Save boards to your account, open them on any device and share a view-only link.' : 'Welcome back.'}</p>
+    <form onSubmit={submit} className="form">
+      <label>Email<input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></label>
+      <label>Password<input type="password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} required minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} /></label>
+      {mode === 'signup' && <small>At least 8 characters. There is no password reset yet, so keep it somewhere safe.</small>}
+      {err && <div className="err" role="alert">{err}</div>}
+      <button className="primary" disabled={busy}>{busy ? 'Please wait…' : mode === 'signup' ? 'Create account' : 'Log in'}</button>
+    </form>
+    <button className="link" onClick={() => { setMode(mode === 'signup' ? 'login' : 'signup'); setErr('') }}>{mode === 'signup' ? 'I already have an account' : 'Create a free account'}</button>
+  </Modal>
+}
+function BoardsDialog(p: { email: string; current: string | null; onClose: () => void; onOpen: (id: string) => void; onSaveNew: () => void; onLogout: () => void; onDeleted: (id: string) => void; shareTok: string | null; setShareTok: (t: string | null) => void; flash: (m: string) => void }) {
+  const [rows, setRows] = useState<BoardRow[] | null>(null)
+  const load = () => api.list().then((r) => setRows(r.boards)).catch((e) => p.flash((e as Error).message))
+  useEffect(() => { load() }, []) // eslint-disable-line
+  const link = (t: string) => `${location.origin}${location.pathname}#/s/${t}`
+  const share = async (r: BoardRow) => { try { const x = await api.share(r.id); await navigator.clipboard?.writeText(link(x.token)).catch(() => {}); p.flash('View-only link copied.'); load() } catch (e) { p.flash((e as Error).message) } }
+  const unshare = async (r: BoardRow) => { await api.unshare(r.id).catch(() => {}); p.flash('Link switched off.'); load() }
+  const del = async (r: BoardRow) => { if (!confirm(`Delete "${r.title}"? This cannot be undone.`)) return; await api.remove(r.id).catch(() => {}); p.onDeleted(r.id); load() }
+  return <Modal title="My boards" onClose={p.onClose}>
+    <p className="hint">Signed in as <b>{p.email}</b>.</p>
+    <div className="row"><button className="primary" onClick={() => { p.onSaveNew(); setTimeout(load, 700) }}>Save current board to my account</button><button onClick={p.onLogout}>Log out</button></div>
+    <div className="blist">
+      {rows === null ? <p className="hint">Loading…</p> : rows.length === 0 ? <p className="hint">No saved boards yet. Save the current one to start.</p> :
+        rows.map((r) => <div key={r.id} className={`brow ${r.id === p.current ? 'on' : ''}`}>
+          <div className="bt"><b>{r.title}</b><small>{new Date(r.updated).toLocaleString()}{r.id === p.current ? ' · open now' : ''}</small></div>
+          <div className="row"><button onClick={() => p.onOpen(r.id)}>Open</button>
+            {r.share ? <><button onClick={() => navigator.clipboard?.writeText(link(r.share!)).then(() => p.flash('Link copied.'))}>Copy link</button><button onClick={() => unshare(r)}>Stop sharing</button></> : <button onClick={() => share(r)}>Share</button>}
+            <button className="danger" onClick={() => del(r)}>Delete</button></div>
+        </div>)}
+    </div>
+  </Modal>
 }
 export default function App() { return <ReactFlowProvider><Inner /></ReactFlowProvider> }
