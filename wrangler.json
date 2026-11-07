@@ -2,6 +2,20 @@
   "name": "nahalabs-canvas",
   "main": "worker/index.js",
   "compatibility_date": "2026-10-01",
-  "assets": { "directory": "./dist", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] },
-  "d1_databases": [{ "binding": "DB", "database_name": "nahalabs-canvas", "database_id": "604703c8-32fa-42cc-bc03-4abf0f996b83" }]
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/api/*"
+    ]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nahalabs-canvas",
+      "database_id": "134c7b85-c0b6-4d70-b3b5-7636781383ec"
+    }
+  ],
+  "account_id": "655bd72036df93c103f655230cf9ade7"
 }
