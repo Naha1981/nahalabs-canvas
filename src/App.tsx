@@ -222,7 +222,7 @@ function Inner() {
       </header>
 
       <section className="intro">
-        <input className="title-input" aria-label="Board title" value={board.title} onChange={(e) => commit((b) => ({ ...b, title: e.target.value.slice(0, 120) }), false)} />
+        <input className="title-input" aria-label="Board title" value={board.title} onChange={(e) => { const title = e.target.value.slice(0, 120); commit((b) => ({ ...b, title })) }} />
         <p className="purpose"><Rich text={board.purpose || 'Add a purpose line for this map.'} /></p>
         <div className="chips" aria-label="Evidence summary">
           {counts.map(([e, n]) => <span key={e} className={`chip chip-${e.toLowerCase()}`} title={EVIDENCE_HELP[e]}>{e} {n}</span>)}
