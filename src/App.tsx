@@ -57,7 +57,8 @@ function Inner() {
   const [joinTok, setJoinTok] = useState<string | null>(null)
   const [joinInfo, setJoinInfo] = useState<{ org: string; role: string } | null>(null)
   const [cloud, setCloud] = useState<{ id: string; rev: number } | null>(() => { try { return JSON.parse(localStorage.getItem(KEY + '-cloud') || 'null') } catch { return null } })
-  const [sync, setSync] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [sync, setSync] = useState<'idle' | 'checking' | 'saving' | 'saved' | 'error' | 'resumeError' | 'conflict'>(cloud ? 'checking' : 'idle')
+  const [resumeAttempt, setResumeAttempt] = useState(0)
   const [ro, setRo] = useState(false)
   const [shareTok, setShareTok] = useState<string | null>(null)
   const past = useRef<Board[]>([])
@@ -91,10 +92,35 @@ function Inner() {
     if (!m) return
     api.shared(m[1]).then((r) => { setBoard(validate(r.board)); setRo(true); setCloud(null); setTimeout(() => rf.fitView({ padding: 0.15 }), 80) }).catch((e) => flash((e as Error).message))
   }, []) // eslint-disable-line
-  // autosave to account
+  // A restored cloud pointer is not a verified save baseline. Read first.
   const lastSaved = useRef(0)
+  const resumed = useRef<string | null>(null)
+  const boardContent = (b: Board) => { const { revision: _revision, ...content } = validate(b); return JSON.stringify(content) }
   useEffect(() => {
     if (!cloud || !user || ro) return
+    if (resumed.current === cloud.id) return
+    let cancelled = false
+    const snapshot = board
+    setSync('checking')
+    api.get(cloud.id).then((r) => {
+      if (cancelled) return
+      if (boardContent(snapshot) !== boardContent(validate(r.board))) {
+        setSync('conflict')
+        flash('Local and account copies differ. Both are kept. Reload the account copy or keep this as a device copy.')
+        return
+      }
+      resumed.current = cloud.id
+      lastSaved.current = snapshot.revision
+      setRo(r.role === 'viewer')
+      setCloud({ id: r.id, rev: r.rev })
+      setSync('saved')
+    }).catch((e) => { if (!cancelled) { setSync('resumeError'); flash((e as Error).message) } })
+    return () => { cancelled = true }
+  }, [cloud?.id, user, ro, resumeAttempt]) // eslint-disable-line
+  // autosave to account
+  const savePaused = sync === 'conflict'
+  useEffect(() => {
+    if (!cloud || !user || ro || resumed.current !== cloud.id || savePaused) return
     if (lastSaved.current === board.revision) return
     setSync('saving')
     const t = setTimeout(async () => {
@@ -102,10 +128,10 @@ function Inner() {
         const r = await api.save(cloud.id, board, cloud.rev)
         lastSaved.current = board.revision
         setCloud({ id: cloud.id, rev: r.rev }); setSync('saved')
-      } catch (e) { setSync('error'); flash((e as Error).message) }
+      } catch (e) { setSync(e instanceof ApiError && e.status === 409 ? 'conflict' : 'error'); flash((e as Error).message) }
     }, 1200)
     return () => clearTimeout(t)
-  }, [board, cloud, user, ro])
+  }, [board, cloud, user, ro, savePaused])
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 3500) }
 
   const commit = useCallback((fn: (b: Board) => Board, record = true) => {
@@ -146,16 +172,16 @@ function Inner() {
     setSel(id)
   }
   const del = () => { if (sel) { commit((b) => ({ ...b, nodes: b.nodes.filter((n) => n.id !== sel), edges: b.edges.filter((e) => e.source !== sel && e.target !== sel) })); setSel(null) } }
-  const useTemplate = (k: string) => { if (!k || ro) return; setCloud(null); setSync('idle'); past.current.push(board); future.current = []; setBoard(stack(TEMPLATES[k]())); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 50) }
+  const selectTemplate = (k: string) => { if (!k || ro) return; setCloud(null); setSync('idle'); past.current.push(board); future.current = []; setBoard(stack(TEMPLATES[k]())); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 50) }
 
   const saveToAccount = async () => {
     if (!user) { setDlg('auth'); return }
     if (!activeOrg || activeOrg.role === 'viewer') { flash('You have view-only access in this organisation. Pick another one or make your own.'); return }
-    try { const r = await api.create(board, activeOrg.id); lastSaved.current = board.revision; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); flash('Saved to your account.') }
+    try { const r = await api.create(board, activeOrg.id); lastSaved.current = board.revision; resumed.current = r.id; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); flash('Saved to your account.') }
     catch (e) { flash((e as Error).message) }
   }
   const openCloud = async (id: string) => {
-    try { const r = await api.get(id); const b = validate(r.board); past.current = []; setRo(r.role === 'viewer'); if (r.org) { setOrgId(r.org); localStorage.setItem(KEY + '-org', r.org) } setBoard(b); lastSaved.current = b.revision; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); setDlg(null); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 80) }
+    try { const r = await api.get(id); const b = validate(r.board); past.current = []; setRo(r.role === 'viewer'); if (r.org) { setOrgId(r.org); localStorage.setItem(KEY + '-org', r.org) } setBoard(b); lastSaved.current = b.revision; resumed.current = r.id; setCloud({ id: r.id, rev: r.rev }); setSync('saved'); setDlg(null); setSel(null); setTimeout(() => (MOBILE ? rf.setViewport({ x: 16, y: 16, zoom: 0.8 }) : rf.fitView({ padding: 0.15 })), 80) }
     catch (e) { flash((e as Error).message) }
   }
   const copyShared = () => { setRo(false); setCloud(null); setSync('idle'); history.replaceState(null, '', location.pathname); setBoard((b) => ({ ...b, id: 'copy' + Date.now() })); flash('This is now your own editable copy on this device.') }
@@ -205,7 +231,7 @@ function Inner() {
             ? <button onClick={() => setDlg('boards')}>My boards</button>
             : <button className="gold" onClick={() => setDlg('auth')}>Sign up free</button>)}
           {!ro && <>
-            <select aria-label="Start from a template" value="" onChange={(e) => useTemplate(e.target.value)}>
+            <select aria-label="Start from a template" value="" onChange={(e) => selectTemplate(e.target.value)}>
               <option value="">Templates</option>
               {Object.entries(TEMPLATE_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
@@ -227,8 +253,10 @@ function Inner() {
         <div className="chips" aria-label="Evidence summary">
           {counts.map(([e, n]) => <span key={e} className={`chip chip-${e.toLowerCase()}`} title={EVIDENCE_HELP[e]}>{e} {n}</span>)}
           <span className="chip chip-owner">{noOwner} without owner</span>
-          <span className="rev">Revision {board.revision} · {ro ? "shared, view only" : cloud && user ? (sync === "saving" ? "saving to your account…" : sync === "error" ? "not saved to your account, retrying on next change" : "saved to your account") : "saved on this device"}</span>
+          <span className="rev">Revision {board.revision} · {ro ? "shared, view only" : cloud && user ? (sync === "checking" ? "checking the account copy…" : sync === "conflict" ? "copies differ, account save paused" : sync === "saving" ? "saving to your account…" : (sync === "error" || sync === "resumeError") ? "not saved to your account" : "saved to your account") : "saved on this device"}</span>
         </div>
+        {sync === 'resumeError' && cloud && <div role="alert">Could not check the account copy. Local work is kept and account saving is paused. <button onClick={() => setResumeAttempt((n) => n + 1)}>Retry account check</button></div>}
+        {sync === 'conflict' && cloud && <div role="alert">Local and account copies differ. Account saving is paused; neither copy was overwritten. <button onClick={() => openCloud(cloud.id)}>Reload account board</button><button onClick={() => { setCloud(null); resumed.current = null; setSync('idle'); flash('Local work kept as a device copy. The account board is unchanged.') }}>Keep local as device copy</button></div>}
         <details className="limits" open={typeof window === 'undefined' || window.innerWidth > 760}>
           <summary><b>Limits</b> - what this map is not</summary>
           This map is a view and a set of notes. Moving a card changes no product record and never counts as an approval. Amounts and conclusions stay candidates until their evidence is Verified.
